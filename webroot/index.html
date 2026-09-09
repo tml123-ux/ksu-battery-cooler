@@ -98,7 +98,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
 <div class="header">
   <div>
     <h1>⚡ 省电与限制发烫</h1>
-    <div class="sub">多档位性能调度 · KernelSU 模块 · 丫丫摄影作品</div>
+    <div class="sub" id="verLine">多档位性能调度 · KernelSU 模块</div>
   </div>
 </div>
 
@@ -285,6 +285,7 @@ function setStatus(msg, isErr=false){
 
 function render(data){
   current = data;
+  $('#verLine').textContent = '多档位性能调度 · KernelSU 模块 · v'+(data.version||'?');
   // 温度
   const t = parseInt(data.temperature||'0');
   $('#tempBig').innerHTML = fmtC(t) + '<small>°C</small>';

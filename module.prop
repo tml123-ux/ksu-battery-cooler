@@ -1,7 +1,7 @@
 id=battery-cooler
 name=省电与限制发烫
-version=v1.3.1
-versionCode=131
+version=v1.3.2
+versionCode=132
 author=丫丫摄影作品
 description=多档位性能限制模块：均衡/超级省电/发烫限制/性能模式，WebUI 实时切换并自动应用 CPU 频率上限。智能快充支持 75~90W 按温度自动调节(最低保底75W)。丫丫摄影作品。
 webuiIcon=⚡

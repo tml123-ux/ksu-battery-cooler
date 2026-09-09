@@ -361,6 +361,14 @@ get_charge_status() {
     echo "$status"
 }
 
+# 模块版本(从 module.prop 读取, 便于 UI 显示与诊断)
+read_ver() {
+    local v
+    v=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -n1)
+    [ -z "$v" ] && v="dev"
+    echo "$v"
+}
+
 # 温度显示: 362 => 36.2
 fmt_temp() { echo "$(( $1 / 10 )).$(( $1 % 10 ))"; }
 
@@ -673,7 +681,7 @@ get_status() {
         case "$actual_current" in ''|*[!0-9]*) actual_current=0 ;; esac
         case "$actual_voltage" in ''|*[!0-9]*) actual_voltage=0 ;; esac
     fi
-    echo "{\"profile\":\"$profile\",\"applied\":\"$applied\",\"override\":\"$override\",\"screen\":\"$screen\",\"screen_auto\":\"$screen_auto\",\"temperature\":\"$temp\",\"thermal_enabled\":\"$en\",\"thermal_limit\":\"$limit\",\"thermal_recover\":\"$recover\",\"little_pct\":\"$little\",\"mid_pct\":\"$mid\",\"big_pct\":\"$big\",\"daemon\":\"$alive\",\"charge_limit\":\"$charge_limit\",\"charge_auto\":\"$charge_auto\",\"charge_target_w\":\"$charge_target_w\",\"charge_power_w\":\"$charge_power_w\",\"charging\":\"$charging\",\"charge_current\":\"$actual_current\",\"charge_voltage\":\"$actual_voltage\"}"
+    echo "{\"version\":\"$(read_ver)\",\"profile\":\"$profile\",\"applied\":\"$applied\",\"override\":\"$override\",\"screen\":\"$screen\",\"screen_auto\":\"$screen_auto\",\"temperature\":\"$temp\",\"thermal_enabled\":\"$en\",\"thermal_limit\":\"$limit\",\"thermal_recover\":\"$recover\",\"little_pct\":\"$little\",\"mid_pct\":\"$mid\",\"big_pct\":\"$big\",\"daemon\":\"$alive\",\"charge_limit\":\"$charge_limit\",\"charge_auto\":\"$charge_auto\",\"charge_target_w\":\"$charge_target_w\",\"charge_power_w\":\"$charge_power_w\",\"charging\":\"$charging\",\"charge_current\":\"$actual_current\",\"charge_voltage\":\"$actual_voltage\"}"
 }
 
 # ---------------- 入口 ----------------
@@ -779,10 +787,33 @@ case "$CMD" in
         ;;
     charge_status)
         # 充电状态诊断
-        echo "=== 充电控制路径探测 ==="
-        detect_charge_paths | tr ' ' '\n' | grep -v '^$' | while read p; do
-            echo "  $p: $(cat "$p" 2>/dev/null)"
+        init
+        echo "=== 模块版本 ==="
+        echo "  $(grep -m1 '^version=' "$MODDIR/module.prop" 2>/dev/null)"
+        echo "  daemon: pid=$(cat "$PIDFILE" 2>/dev/null) alive=$(daemon_alive)"
+        echo ""
+        echo "=== power_supply 全部节点 ==="
+        for d in $SYS/class/power_supply/*/; do
+            [ -d "$d" ] || continue
+            n=$(basename "$d")
+            t=$(cat "$d/type" 2>/dev/null)
+            on=$(cat "$d/online" 2>/dev/null)
+            st=$(cat "$d/status" 2>/dev/null)
+            ct=$(cat "$d/charge_type" 2>/dev/null)
+            echo "  $n: type=${t:-?} online=${on:-?} status=${st:-?} charge_type=${ct:-?}"
         done
+        echo ""
+        echo "=== charge_online 判定 ==="
+        echo "  result=$(charge_online)"
+        echo "  候选在线源(非电池/电量计):"
+        for f in $SYS/class/power_supply/*/online; do
+            [ -r "$f" ] || continue
+            d=$(dirname "$f")
+            t=$(cat "$d/type" 2>/dev/null)
+            case "$t" in *attery*|*BMS*) continue ;; esac
+            echo "    $f = $(cat "$f" 2>/dev/null) (type=$t)"
+        done
+        echo "  battery/status = $(cat $SYS/class/power_supply/battery/status 2>/dev/null)"
         echo ""
         echo "=== 当前充电参数 ==="
         get_charge_status
