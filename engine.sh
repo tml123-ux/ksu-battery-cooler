@@ -671,16 +671,24 @@ get_status() {
     # 充电在线状态
     local charging
     charging=$(charge_online)
-    # 仅在充电器连接时展示电流/电压, 否则统一为 0(避免误读 max 残留值/配置回退)
+    # 仅在充电器连接时展示实时电流/电压, 否则统一为 0(避免误读 max 残留值/配置回退)
+    # 实时优先级: current_now/voltage_now(取绝对值, 放电为负) > max 节点 > 配置兜底
     local actual_current=0 actual_voltage=0
     if [ "$charging" = "1" ]; then
-        [ -r "$SYS/class/power_supply/battery/current_max" ] && \
-            actual_current=$(cat "$SYS/class/power_supply/battery/current_max" 2>/dev/null)
-        [ -r "$SYS/class/power_supply/battery/voltage_max" ] && \
-            actual_voltage=$(cat "$SYS/class/power_supply/battery/voltage_max" 2>/dev/null)
-        # 某些设备 max 节点在充电时不可读, 用配置值兜底
-        [ -z "$actual_current" ] && actual_current="$charge_current"
-        [ -z "$actual_voltage" ] && actual_voltage="$charge_voltage"
+        if [ -r "$SYS/class/power_supply/battery/current_now" ]; then
+            actual_current=$(cat "$SYS/class/power_supply/battery/current_now" 2>/dev/null)
+            case "$actual_current" in -* ) actual_current=${actual_current#-} ;; esac
+        fi
+        if [ -r "$SYS/class/power_supply/battery/voltage_now" ]; then
+            actual_voltage=$(cat "$SYS/class/power_supply/battery/voltage_now" 2>/dev/null)
+            case "$actual_voltage" in -* ) actual_voltage=${actual_voltage#-} ;; esac
+        fi
+        # 实时值缺失或为 0 -> 读 max 上限节点
+        case "$actual_current" in ''|0) actual_current=$(cat "$SYS/class/power_supply/battery/current_max" 2>/dev/null) ;; esac
+        case "$actual_voltage" in ''|0) actual_voltage=$(cat "$SYS/class/power_supply/battery/voltage_max" 2>/dev/null) ;; esac
+        # 仍无效(文件缺失/内容0) -> 用配置值兜底
+        case "$actual_current" in ''|0) actual_current="$charge_current" ;; esac
+        case "$actual_voltage" in ''|0) actual_voltage="$charge_voltage" ;; esac
         # 数值合法性(全数字)
         case "$actual_current" in ''|*[!0-9]*) actual_current=0 ;; esac
         case "$actual_voltage" in ''|*[!0-9]*) actual_voltage=0 ;; esac
