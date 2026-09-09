@@ -2,6 +2,7 @@
 battery-cooler-*.zip
 !release/battery-cooler-v1.0.0.zip
 !release/battery-cooler-v1.1.0.zip
+!release/battery-cooler-v1.2.0.zip
 
 # 临时文件
 *.log

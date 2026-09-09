@@ -2,7 +2,7 @@
 
 ## 重要提示：硬件限制
 
-**原装充电器实际只能输出 35W，这是物理限制，软件无法突破。**
+**模块已将快速充电目标调整为 ~90W，但实际功率取决于充电器/线缆/接口与充电IC上限，软件无法突破硬件物理限制。**
 
 可能的原因：
 1. 充电器本身功率不足（可能不是原装或已损坏）
@@ -24,7 +24,7 @@
 # 查看充电路径
 su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_status"
 
-# 启用快速充电（4.5A / 4.4V，理论 ~75W）
+# 启用快速充电（20.45A / 4.4V，理论 ~90W）
 su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_fast"
 
 # 恢复默认充电（2.0A / 4.2V）
@@ -58,8 +58,8 @@ su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_normal"
 
 ## 预期结果
 
-- 如果硬件支持 75W 充电：软件提升后功率会增加
-- 如果硬件限制 35W：软件提升无效，功率不变
+- 如果硬件支持 90W 充电：软件提升后功率会增加
+- 如果硬件限制更低（如 35W）：软件提升无效，功率不变
 
 ## 下一步
 

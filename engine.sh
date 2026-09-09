@@ -626,17 +626,17 @@ case "$CMD" in
         ;;
     charge_fast)
         # 快速充电模式 (提升电流和电压)
-        # 目标: ~75W = 4.4V * 17A (理论值)
-        # 实际限制: 取决于硬件能力
+        # 目标: ~90W (理论值, 按电池端 4.4V 折算电流 ~20.45A)
+        # 实际功率取决于充电器/线缆/接口与充电IC上限, 软件无法突破硬件物理限制
         init
-        target_current="${2:-4500000}"  # 4.5A = 4500000uA
-        target_voltage="${3:-4400000}"  # 4.4V = 4400000uV
+        target_current="${2:-20450000}"  # 20.45A = 20450000uA (90W @4.4V)
+        target_voltage="${3:-4400000}"   # 4.4V = 4400000uV
         set_charge_current "$target_current"
         set_charge_voltage "$target_voltage"
         toggle_charge_limit 1
         set_conf charge_current "$target_current"
         set_conf charge_voltage "$target_voltage"
-        echo "fast charge enabled: ${target_current}uA / ${target_voltage}uV"
+        echo "fast charge enabled: ${target_current}uA / ${target_voltage}uV (~90W 理论)"
         ;;
     charge_normal)
         # 正常充电模式 (恢复默认)
