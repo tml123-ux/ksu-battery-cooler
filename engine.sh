@@ -266,38 +266,42 @@ power_w_to_ua() {
 }
 
 # 检测是否正在充电/插电: 0=否 1=是
-# 优先级: 环境变量 BC_CHARGER_FILE(mock) > 充电器(非电池)在线节点 > battery/status
-# 注意: 必须排除 battery/bms 等电池自身节点, 它们的 online 恒为 1(电池在位), 不代表充电器已连接
+# 优先级: 环境变量 BC_CHARGER_FILE(mock) > battery/status > 充电器 type 白名单节点
+# 注意:
+#   1) battery/status 由电量计维护(Discharging=未插电), 是可靠主判据
+#   2) 大量非充电组件(display/mcu/mtk-gauge/vfcs-pi-i2c/wls_trx/bat_encryptor 等)
+#      type=Unknown 且 online 恒为 1, 绝不能当作充电器
+#   3) 只认 type 白名单(USB/USB_PD/Mains/AC/Wireless/PD 等明确充电器类型)
 charge_online() {
-    local v f d t found=0
+    local v f d t
     if [ -n "$BC_CHARGER_FILE" ] && [ -f "$BC_CHARGER_FILE" ]; then
         v=$(cat "$BC_CHARGER_FILE" 2>/dev/null | tr -d ' \n\r')
         case "$v" in 0) echo 0; return 0 ;; 1) echo 1; return 0 ;; esac
     fi
-    # 1) 遍历真正的充电器源(USB/Mains/Wireless 等, type != Battery)的 online 节点
+    # 1) battery/status 主判据: Discharging 一定未插; Charging/Full 一定已插
+    #    注意 Discharging/Not charging 含 "charging" 子串, 必须精确前缀匹配
+    if [ -r "$SYS/class/power_supply/battery/status" ]; then
+        v=$(cat "$SYS/class/power_supply/battery/status" 2>/dev/null | tr -d ' \n\r')
+        case "$v" in
+            Discharging*) echo 0; return 0 ;;
+            Charging*|Full*) echo 1; return 0 ;;
+        esac
+    fi
+    # 2) status 不可读或为 Not charging/Unknown 时, 兜底查 type 白名单的充电器源
     for f in $SYS/class/power_supply/*/online; do
         [ -r "$f" ] || continue
         d=$(dirname "$f")
         t=""
         [ -r "$d/type" ] && t=$(cat "$d/type" 2>/dev/null)
-        # 电池/电量计自身节点排除
+        # 只认明确充电器类型; Unknown/Battery/空 一律跳过
         case "$t" in
-            *attery*|*BMS*) continue ;;
+            USB*|Mains*|AC*|Wireless*|USB_PD*|PD*|DCP*|CDP*|SDP*|PPS*)
+                ;;
+            *) continue ;;
         esac
-        found=1
         v=$(cat "$f" 2>/dev/null | tr -d ' \n\r')
         [ "$v" = "1" ] && { echo 1; return 0; }
     done
-    # 2) 存在充电器节点但全部为 0 -> 未插电
-    [ "$found" = "1" ] && { echo 0; return 0; }
-    # 3) 无充电器节点(极少见), 退回 battery/status
-    # 注意: Discharging / Not charging 也含 "charging" 子串, 必须精确匹配前缀
-    if [ -r "$SYS/class/power_supply/battery/status" ]; then
-        v=$(cat "$SYS/class/power_supply/battery/status" 2>/dev/null | tr -d ' \n\r')
-        case "$v" in
-            Charging|Charging*|Full|Full*) echo 1; return 0 ;;
-        esac
-    fi
     echo 0
 }
 
