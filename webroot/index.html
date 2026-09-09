@@ -143,6 +143,13 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
     </div>
     <label class="sw"><input type="checkbox" id="thermalEnabled"><span class="slider"></span></label>
   </div>
+  <div class="row">
+    <div class="label">
+      <div class="t">待机自动超级省电</div>
+      <div class="s">屏幕熄灭后自动降至省电档，亮屏恢复</div>
+    </div>
+    <label class="sw"><input type="checkbox" id="screenAuto"><span class="slider"></span></label>
+  </div>
 </div>
 
 <div class="sec"><span class="t">温度墙</span></div>
@@ -214,9 +221,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
 <div class="toastfix" id="statusText" style="font-size:12.5px;color:var(--text-sub);text-align:center;margin-top:12px"></div>
 
 <div class="foot">
-  本模块通过 sysfs 限制 CPU 最高频率实现省电与控温，<br>
-  充电控制为实验性功能，实际功率受硬件限制。<br>
-  仅在受支持的内核节点上生效，不影响系统文件。
+   本模块通过 sysfs 限制 CPU 最高频率实现省电与控温，<br>
+   充电控制为实验性功能，实际功率受硬件限制。<br>
+   仅在受支持的内核节点上生效，不影响系统文件。<br>
+   作者：丫丫摄影
 </div>
 
 <script src="js/kernelsu.js"></script>
@@ -265,12 +273,15 @@ function render(data){
   const pill = $('#tempPill');
   const limit = parseInt(data.thermal_limit||'40');
   const over = data.override === '1';
+  const standby = data.screen === '1';
   if(over){ pill.className='pill limit'; pill.textContent='⛔ 正在降频限制'; }
+  else if(standby){ pill.className='pill ok'; pill.textContent='🌙 待机省电中'; }
   else if(t > 0 && t >= limit*10){ pill.className='pill hot'; pill.textContent='⚠ 接近温度墙'; }
   else if(t > 0 && t >= (limit*10-30)){ pill.className='pill hot'; pill.textContent='温度偏高'; }
   else { pill.className='pill ok'; pill.textContent='● 温度正常'; }
 
   $('#thermalEnabled').checked = data.thermal_enabled === '1';
+  $('#screenAuto').checked = data.screen_auto !== '0';
   $('#limitSlider').value = data.thermal_limit||40;
   $('#recoverSlider').value = data.thermal_recover||37;
   syncSliderFills();
@@ -340,6 +351,10 @@ async function init(){
   $('#thermalEnabled').addEventListener('change', async e=>{
     await sh(`${ENG} set thermal_enabled ${e.target.checked?1:0}`);
     setStatus(e.target.checked? '温控守护已开启':'温控守护已关闭');
+  });
+  $('#screenAuto').addEventListener('change', async e=>{
+    await sh(`${ENG} set screen_auto ${e.target.checked?1:0}`);
+    setStatus(e.target.checked? '待机自动超级省电已开启':'待机自动超级省电已关闭');
   });
   $('#limitSlider').addEventListener('input', e=>{
     syncSliderFills();

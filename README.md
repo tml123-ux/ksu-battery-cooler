@@ -1,6 +1,8 @@
 # 省电与限制发烫 (battery-cooler)
 
-KernelSU 模块，通过 sysfs 限制 CPU 最高频率，提供四档性能调度 + 过热自动降频。
+> 作者：丫丫摄影
+
+KernelSU 模块，通过 sysfs 限制 CPU 最高频率，提供四档性能调度 + 过热自动降频 + 待机自动省电。
 
 ## vivo X300pro (V2502A) 适配
 
@@ -39,6 +41,15 @@ WebUI 中已添加充电控制卡片，可在界面中切换。
 - 温度 **<= 恢复温度**（默认 37°C）→ 自动恢复用户所选档位
 - 用户在过热期间手动切换档位 → 以新档位为准重新评估
 
+## 待机自动超级省电
+
+开启（默认）后守护进程持续检测屏幕状态：
+
+- 屏幕 **熄灭** → 自动临时降至超级省电（powersave）档
+- 屏幕 **点亮** → 自动恢复用户所选档位
+- 温控 override 优先级更高：过热期间即使息屏也保持 thermal 档降温
+- 通过 WebUI「待机自动超级省电」开关或 `set screen_auto 0|1` 启停
+
 ## 文件结构
 
 ```
@@ -65,6 +76,7 @@ battery-cooler/
 
 - 点选档位卡片 → 立即切换并保存
 - 「智能温控守护」开关 → 启用/停用自动降频
+- 「待机自动超级省电」开关 → 屏幕熄灭时自动降至省电档
 - 「触发温度」「恢复温度」滑杆 → 实时调整温度墙
 - 「一键恢复」→ 切回均衡并停用温控
 
@@ -93,6 +105,8 @@ su -c "sh /data/adb/modules/battery-cooler/engine.sh stop"
 # 改温度墙(单位 °C)
 su -c "sh /data/adb/modules/battery-cooler/engine.sh set thermal_limit 40"
 su -c "sh /data/adb/modules/battery-cooler/engine.sh set thermal_recover 37"
+# 启停待机自动超级省电(0/1)
+su -c "sh /data/adb/modules/battery-cooler/engine.sh set screen_auto 1"
 ```
 
 ## 原理与兼容性

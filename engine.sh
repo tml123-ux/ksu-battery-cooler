@@ -31,6 +31,7 @@ default_conf() {
     printf '%s\n' \
         'profile=balanced' \
         'thermal_enabled=1' \
+        'screen_auto=1' \
         'thermal_limit=40' \
         'thermal_recover=37' \
         'poll_ms=5000' \
@@ -128,6 +129,43 @@ read_temp_raw() {
         log "warn: 未找到有效温度读数, 请运行 temp_debug 诊断"
     fi
     [ "$max" -gt 0 ] && echo "$max" || echo "0"
+}
+
+# ---------------- 屏幕状态 ----------------
+# 输出: 1=亮屏 0=灭屏
+# 判定优先级: 环境变量 BC_SCREEN_FILE(mock) > 亮度节点 > dumpsys power > 默认亮屏
+screen_is_on() {
+    local v b found=0 on=0 f
+    # 调试/测试覆盖: BC_SCREEN_FILE 文件内容 0/1
+    if [ -n "$BC_SCREEN_FILE" ] && [ -f "$BC_SCREEN_FILE" ]; then
+        v=$(cat "$BC_SCREEN_FILE" 2>/dev/null)
+        case "$v" in
+            0) echo 0; return 0 ;;
+            1) echo 1; return 0 ;;
+        esac
+    fi
+    # 亮度节点法(低开销, 无需 binder)
+    for b in $SYS/class/backlight/*/brightness $SYS/class/leds/lcd-backlight/brightness; do
+        [ -r "$b" ] || continue
+        found=1
+        v=$(cat "$b" 2>/dev/null | tr -d ' \n\r')
+        case "$v" in ''|*[!0-9]*) continue ;; esac
+        [ "$v" -gt 0 ] 2>/dev/null && on=1
+    done
+    if [ "$found" = "1" ]; then
+        [ "$on" = "1" ] && echo 1 || echo 0
+        return 0
+    fi
+    # 权威方式: dumpsys power 唤醒状态
+    if command -v dumpsys >/dev/null 2>&1; then
+        v=$(dumpsys power 2>/dev/null | grep -o 'mWakefulness=[A-Za-z]*' | head -n1 | cut -d= -f2)
+        case "$v" in
+            Awake|Dreaming) echo 1; return 0 ;;
+            Asleep|Dozing|LightDoze|DeepDoze|OFF) echo 0; return 0 ;;
+        esac
+    fi
+    # 无法判定 -> 默认亮屏(不误触省电)
+    echo 1
 }
 
 # ---------------- 充电控制 ----------------
@@ -306,11 +344,17 @@ apply_profile() { # <profile>
     echo "applied $profile (ok=$n, skip=$err)"
 }
 
-# ---------------- 温控守护 ----------------
-# 后台循环: 温度 >= limit 时(除 thermal 档外)临时压到 thermal 档;
-# 温度回落到 recover 以下后恢复用户档位。
+# ---------------- 温控 + 待机守护 ----------------
+# 后台循环, 两层临时降档:
+#  1) 温控: 温度 >= limit 时(除 thermal 档外)临时压到 thermal 档;
+#            温度回落到 recover 以下后解除。
+#  2) 待机: 屏幕熄灭且 screen_auto=1 时临时压到 powersave 档;
+#            亮屏后恢复。
+# 优先级: 温控 override > 待机 screen > 用户档位(profile)
 daemon_loop() {
-    local en limit recover poll profile override temp prev_profile applied
+    local en limit recover poll profile temp override screen
+    local screen_auto screen_on prev_profile applied prev_applied
+    local new_override new_screen desired logmsg
     en=$(get_conf thermal_enabled 1)
     [ "$en" = "1" ] || { log "daemon: thermal_enabled=0, 退出"; exit 0; }
     log "daemon: 启动 thermal_enabled=1"
@@ -319,35 +363,64 @@ daemon_loop() {
         recover=$(get_conf thermal_recover 37)
         poll=$(get_conf poll_ms 5000)
         profile=$(get_conf profile balanced)
+        screen_auto=$(get_conf screen_auto 1)
         temp=$(read_temp_raw)
-        override="0"; prev_profile="$profile"
+        override="0"; screen="0"; prev_profile="$profile"; prev_applied="$profile"
         # 读取守护上次写入的状态
         if [ -f "$STATE" ]; then
             override=$(grep -o '"override":"[0-9]*"' "$STATE" | head -n1 | cut -d'"' -f4)
+            screen=$(grep -o '"screen":"[0-9]*"' "$STATE" | head -n1 | cut -d'"' -f4)
             prev_profile=$(grep -o '"profile":"[^"]*"' "$STATE" | head -n1 | cut -d'"' -f4)
+            prev_applied=$(grep -o '"applied":"[^"]*"' "$STATE" | head -n1 | cut -d'"' -f4)
         fi
         [ -z "$override" ] && override="0"
+        [ -z "$screen" ] && screen="0"
+        [ -z "$prev_applied" ] && prev_applied="$profile"
         # 用户手动切换档位 -> 重置守护状态, 以新档为基准重新评估
         if [ "$profile" != "$prev_profile" ]; then
-            override=0
-            log "daemon: 检测到档位切换 -> $profile, 重置 override"
+            override=0; screen=0
+            log "daemon: 检测到档位切换 -> $profile, 重置守护状态"
         fi
-        if [ "$temp" -gt 0 ]; then
-            if [ "$temp" -ge $((limit * 10)) ] && [ "$profile" != "thermal" ]; then
-                if [ "$override" != "1" ]; then
-                    apply_profile thermal >/dev/null 2>&1
-                    log "daemon: 过热 $(fmt_temp $temp)°C >= ${limit}°C, 临时进入 thermal 档"
-                    override=1
-                fi
-            elif [ "$temp" -le $((recover * 10)) ] && [ "$override" = "1" ]; then
-                apply_profile "$profile" >/dev/null 2>&1
-                log "daemon: 回落 $(fmt_temp $temp)°C <= ${recover}°C, 恢复 $profile 档"
-                override=0
+        # 计算新温控状态(带迟滞: 升温到 limit 触发, 降温到 recover 解除)
+        new_override="$override"
+        if [ "$temp" -gt 0 ] && [ "$profile" != "thermal" ]; then
+            if [ "$temp" -ge $((limit * 10)) ] && [ "$new_override" != "1" ]; then
+                new_override=1
+                logmsg="daemon: 过热 $(fmt_temp $temp)°C >= ${limit}°C, 进入 thermal 档"
+            elif [ "$temp" -le $((recover * 10)) ] && [ "$new_override" = "1" ]; then
+                new_override=0
+                logmsg="daemon: 回落 $(fmt_temp $temp)°C <= ${recover}°C, 解除温控降档"
             fi
         fi
-        applied="$profile"
-        [ "$override" = "1" ] && applied="thermal"
-        echo "{\"profile\":\"$profile\",\"override\":\"$override\",\"applied\":\"$applied\",\"temperature\":\"$temp\",\"limit\":\"$limit\",\"recover\":\"$recover\",\"ts\":\"$(date +%s)\"}" > "$STATE"
+        # 计算待机状态
+        new_screen="$screen"
+        if [ "$screen_auto" = "1" ]; then
+            screen_on=$(screen_is_on)
+            if [ "$screen_on" = "0" ]; then
+                # 灭屏且未处于温控降档 -> 进入待机省电
+                if [ "$new_override" != "1" ] && [ "$new_screen" != "1" ]; then
+                    new_screen=1
+                    logmsg="daemon: 屏幕熄灭, 进入待机超级省电"
+                fi
+            else
+                # 亮屏 -> 解除待机省电
+                if [ "$new_screen" = "1" ]; then
+                    new_screen=0
+                    logmsg="daemon: 屏幕点亮, 退出待机省电"
+                fi
+            fi
+        else
+            new_screen=0
+        fi
+        # 计算实际生效档位: 温控 > 待机 > 用户档
+        desired="$profile"
+        [ "$new_screen" = "1" ] && desired="powersave"
+        [ "$new_override" = "1" ] && desired="thermal"
+        if [ "$desired" != "$prev_applied" ]; then
+            apply_profile "$desired" >/dev/null 2>&1
+            log "$logmsg (-> $desired)"
+        fi
+        echo "{\"profile\":\"$profile\",\"override\":\"$new_override\",\"screen\":\"$new_screen\",\"applied\":\"$desired\",\"temperature\":\"$temp\",\"limit\":\"$limit\",\"recover\":\"$recover\",\"ts\":\"$(date +%s)\"}" > "$STATE"
         chmod 600 "$STATE" 2>/dev/null
         # poll 秒数(下限 1)
         if [ "$poll" -lt 1000 ] 2>/dev/null; then sec=1
@@ -382,7 +455,7 @@ stop_daemon() {
     [ -n "$pid" ] && kill "$pid" 2>/dev/null
     rm -f "$PIDFILE"
     # 状态复位, 避免残留 override
-    [ -f "$STATE" ] && sed -i 's/"override":"[0-9]*"/"override":"0"/' "$STATE" 2>/dev/null
+    [ -f "$STATE" ] && sed -i 's/"override":"[0-9]*"/"override":"0"/;s/"screen":"[0-9]*"/"screen":"0"/' "$STATE" 2>/dev/null
     echo "daemon stopped"
 }
 
@@ -398,17 +471,21 @@ daemon_alive() {
 # ---------------- 状态 JSON ----------------
 get_status() {
     local profile temp en limit recover pct little mid big override alive applied
+    local screen screen_auto
     profile=$(get_conf profile balanced)
+    screen_auto=$(get_conf screen_auto 1)
     alive=$(daemon_alive)
-    override="0"; applied="$profile"
+    override="0"; screen="0"; applied="$profile"
     if [ "$alive" = "1" ] && [ -f "$STATE" ]; then
-        # daemon 运行中: 优先用其缓存的温度/override/applied
+        # daemon 运行中: 优先用其缓存的温度/override/screen/applied
         temp=$(grep -o '"temperature":"[0-9]*"' "$STATE" | head -n1 | cut -d'"' -f4)
         override=$(grep -o '"override":"[0-9]*"' "$STATE" | head -n1 | cut -d'"' -f4)
+        screen=$(grep -o '"screen":"[0-9]*"' "$STATE" | head -n1 | cut -d'"' -f4)
         applied=$(grep -o '"applied":"[^"]*"' "$STATE" | head -n1 | cut -d'"' -f4)
     fi
     [ -z "$temp" ] && temp=$(read_temp_raw)
     [ -z "$override" ] && override="0"
+    [ -z "$screen" ] && screen="0"
     [ -z "$applied" ] && applied="$profile"
     en=$(get_conf thermal_enabled 1)
     limit=$(get_conf thermal_limit 40)
@@ -430,7 +507,7 @@ get_status() {
         actual_voltage=$(cat "$SYS/class/power_supply/battery/voltage_max" 2>/dev/null)
     [ -z "$actual_current" ] && actual_current="$charge_current"
     [ -z "$actual_voltage" ] && actual_voltage="$charge_voltage"
-    echo "{\"profile\":\"$profile\",\"applied\":\"$applied\",\"override\":\"$override\",\"temperature\":\"$temp\",\"thermal_enabled\":\"$en\",\"thermal_limit\":\"$limit\",\"thermal_recover\":\"$recover\",\"little_pct\":\"$little\",\"mid_pct\":\"$mid\",\"big_pct\":\"$big\",\"daemon\":\"$alive\",\"charge_limit\":\"$charge_limit\",\"charge_current\":\"$actual_current\",\"charge_voltage\":\"$actual_voltage\"}"
+    echo "{\"profile\":\"$profile\",\"applied\":\"$applied\",\"override\":\"$override\",\"screen\":\"$screen\",\"screen_auto\":\"$screen_auto\",\"temperature\":\"$temp\",\"thermal_enabled\":\"$en\",\"thermal_limit\":\"$limit\",\"thermal_recover\":\"$recover\",\"little_pct\":\"$little\",\"mid_pct\":\"$mid\",\"big_pct\":\"$big\",\"daemon\":\"$alive\",\"charge_limit\":\"$charge_limit\",\"charge_current\":\"$actual_current\",\"charge_voltage\":\"$actual_voltage\"}"
 }
 
 # ---------------- 入口 ----------------
@@ -596,6 +673,12 @@ case "$CMD" in
                 case "$V" in ''|*[!0-9]*)
                     echo "invalid value, need number"; exit 1 ;; esac
                 set_conf "$K" "$V"
+                ;;
+            screen_auto)
+                case "$V" in 0|1) set_conf "$K" "$V" ;;
+                    *) echo "invalid value(0/1)"; exit 1 ;; esac
+                # 若开启且 daemon 未运行, 拉起守护
+                if [ "$V" = "1" ]; then start_daemon; fi
                 ;;
             charge_limit)
                 case "$V" in 0|1)
