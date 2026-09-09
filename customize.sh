@@ -3,7 +3,7 @@
 ui_print "================================"
 ui_print "  省电与限制发烫 (battery-cooler)"
 ui_print "  均衡 / 超级省电 / 发烫限制 / 性能"
-ui_print "  充电控制(实验性) 90W 快充目标"
+ui_print "  智能快充 75~90W 插电自动(最低75W)"
 ui_print "  安装后请在 KernelSU 管理器打开"
 ui_print "  模块的 WebUI 进行配置"
 ui_print ""

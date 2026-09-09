@@ -25,13 +25,23 @@ KernelSU 模块，通过 sysfs 限制 CPU 最高频率，提供四档性能调�
 
 **注意**: 充电功率受硬件限制（充电器、线缆、接口），软件无法突破物理上限。
 
+### 智能快充（插电自动按温度调节）
+
+开启后由守护进程持续监控：
+
+- 电池温度 **≤ 36°C** → 按目标功率请求（75~90W 可调）
+- 电池温度 **越高越降**，到 **≥ 46°C** 时降到最低并**保底 75W**，温度回落自动升回
+- 插上电源自动开始调节，拔出电源自动停止
+
 | 命令 | 功能 |
 |------|------|
-| `charge_fast` | 启用快速充电（20.45A / 4.4V，理论 ~90W）|
-| `charge_normal` | 恢复默认充电（2.0A / 4.2V，理论 ~8.4W）|
+| `charge_fast [W]` | 开启智能快充，目标功率默认 90W（可传 75~90）|
+| `charge_normal` | 关闭智能快充，恢复默认充电（2.0A / 4.2V）|
+| `set charge_target_w <75~90>` | 调整目标功率 |
+| `set charge_auto 0\|1` | 手动启停自动调节 |
 | `charge_status` | 查看充电路径和参数 |
 
-WebUI 中已添加充电控制卡片，可在界面中切换。
+WebUI 中「充电控制」卡片可调节目标功率滑杆并实时查看请求功率与充电状态。
 
 ## 温控守护（自动降频）
 
@@ -89,10 +99,14 @@ su -c "sh /data/adb/modules/battery-cooler/engine.sh cpuinfo"
 # 查看充电状态
 su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_status"
 
-# 启用快速充电
+# 启用智能快充(目标 90W, 插电自动按温度 75~90W 调节)
 su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_fast"
+# 或指定目标 85W
+su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_fast 85"
+# 调整目标功率
+su -c "sh /data/adb/modules/battery-cooler/engine.sh set charge_target_w 82"
 
-# 恢复默认充电
+# 恢复默认充电(关闭智能快充)
 su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_normal"
 
 # 应用档位

@@ -37,6 +37,8 @@ default_conf() {
         'poll_ms=5000' \
         'boot_apply=1' \
         'charge_limit=1' \
+        'charge_auto=0' \
+        'charge_target_w=90' \
         'charge_current=3000000' \
         'charge_voltage=4400000'
 }
@@ -249,6 +251,90 @@ toggle_charge_limit() {
     echo "charge_limit=$enable (written=$written paths)"
 }
 
+# ---------------- 充电功率自动调节 ----------------
+# 设计目标: 插电后按电池温度自动调节请求功率, 范围 75W~charge_target_w(90W 上限),
+#           温度越高功率越低, 最低保持 75W, 温度回落恢复目标功率
+# 温度区间: <= 36.0°C 给满目标功率; >= 46.0°C 给最低 75W; 中间线性回落
+AUTO_COOL_T=360   # 36.0°C
+AUTO_HOT_T=460    # 46.0°C
+AUTO_MIN_W=75     # 最低保持功率
+
+# 功率(W) -> 电流(uA), 按 4.4V 电池端折算 (与原 charge_fast 一致)
+power_w_to_ua() {
+    local w="$1"
+    echo "$(( w * 10000000 / 44 ))"
+}
+
+# 检测是否正在充电/插电: 0=否 1=是
+# 优先级: 环境变量 BC_CHARGER_FILE(mock) > battery/status > online 节点
+charge_online() {
+    local v f
+    if [ -n "$BC_CHARGER_FILE" ] && [ -f "$BC_CHARGER_FILE" ]; then
+        v=$(cat "$BC_CHARGER_FILE" 2>/dev/null | tr -d ' \n\r')
+        case "$v" in 0) echo 0; return 0 ;; 1) echo 1; return 0 ;; esac
+    fi
+    if [ -r "$SYS/class/power_supply/battery/status" ]; then
+        v=$(cat "$SYS/class/power_supply/battery/status" 2>/dev/null)
+        case "$v" in
+            *Charging*|*charging*) echo 1; return 0 ;;
+        esac
+    fi
+    for f in $SYS/class/power_supply/*/online; do
+        [ -r "$f" ] || continue
+        v=$(cat "$f" 2>/dev/null | tr -d ' \n\r')
+        [ "$v" = "1" ] && { echo 1; return 0; }
+    done
+    echo 0
+}
+
+# 按温度计算请求功率(W): 温度 -> 目标与最低之间的线性回落
+charge_power_for_temp() {
+    local t="$1" target_w="$2" span range diff
+    [ -z "$target_w" ] && target_w=90
+    [ "$target_w" -lt "$AUTO_MIN_W" ] 2>/dev/null && target_w="$AUTO_MIN_W"
+    [ "$target_w" -gt 90 ] 2>/dev/null && target_w=90
+    [ -z "$t" ] && t=0
+    if [ "$t" -le "$AUTO_COOL_T" ] 2>/dev/null; then
+        echo "$target_w"; return 0
+    fi
+    if [ "$t" -ge "$AUTO_HOT_T" ] 2>/dev/null; then
+        echo "$AUTO_MIN_W"; return 0
+    fi
+    # 线性回落: 在 cool..hot 之间从 target_w 降到 75W
+    span=$(( AUTO_HOT_T - AUTO_COOL_T ))
+    range=$(( target_w - AUTO_MIN_W ))
+    diff=$(( t - AUTO_COOL_T ))
+    echo "$(( target_w - range * diff / span ))"
+}
+
+# 按指定功率(W)写入充电请求: 换算 uA -> 写电流/电压节点并记入配置
+apply_charge_power_w() {
+    local w="$1" ua
+    [ -z "$w" ] && return 1
+    init
+    ua=$(power_w_to_ua "$w")
+    set_charge_current "$ua"
+    set_charge_voltage 4400000
+    toggle_charge_limit 1
+    set_conf charge_power_w "$w"
+}
+
+# 按当前温度请求一次功率(供手动命令): 返回并应用功率
+apply_charge_auto_once() {
+    init
+    local t target_w w ua
+    t=$(read_temp_raw)
+    target_w=$(get_conf charge_target_w 90)
+    w=$(charge_power_for_temp "$t" "$target_w")
+    ua=$(power_w_to_ua "$w")
+    set_charge_current "$ua"
+    set_charge_voltage 4400000
+    toggle_charge_limit 1
+    set_conf charge_target_w "$target_w"
+    set_conf charge_power_w "$w"
+    echo "auto charge applied: ${w}W / ${ua}uA (temp $(fmt_temp $t)°C)"
+}
+
 # 充电状态
 get_charge_status() {
     local status=""
@@ -344,26 +430,56 @@ apply_profile() { # <profile>
     echo "applied $profile (ok=$n, skip=$err)"
 }
 
-# ---------------- 温控 + 待机守护 ----------------
-# 后台循环, 两层临时降档:
+# ---------------- 温控 + 待机 + 充电守护 ----------------
+# 后台循环, 临时降档 + 插电自动充电调节:
 #  1) 温控: 温度 >= limit 时(除 thermal 档外)临时压到 thermal 档;
 #            温度回落到 recover 以下后解除。
 #  2) 待机: 屏幕熄灭且 screen_auto=1 时临时压到 powersave 档;
 #            亮屏后恢复。
+#  3) 充电: charge_auto=1 且插电充电时, 按电池温度在 75W~charge_target_w
+#            之间自动请求功率(温度越高越低, 最低保底 75W)。
 # 优先级: 温控 override > 待机 screen > 用户档位(profile)
+# 温控与充电调节相互独立(charge_auto 不依赖 thermal_enabled)
+
+# 是否仍需要守护运行(任一特性开启)
+daemon_needed() {
+    local a b c
+    a=$(get_conf thermal_enabled 1)
+    b=$(get_conf screen_auto 1)
+    c=$(get_conf charge_auto 0)
+    { [ "$a" = "1" ] || [ "$b" = "1" ] || [ "$c" = "1" ]; } && { echo 1; return 0; }
+    echo 0
+}
+
+# 按当前配置启停守护
+update_daemon() {
+    if [ "$(daemon_needed)" = "1" ]; then
+        start_daemon
+    else
+        stop_daemon
+    fi
+}
+
 daemon_loop() {
-    local en limit recover poll profile temp override screen
+    local en sa ca limit recover poll profile temp override screen
     local screen_auto screen_on prev_profile applied prev_applied
     local new_override new_screen desired logmsg
-    en=$(get_conf thermal_enabled 1)
-    [ "$en" = "1" ] || { log "daemon: thermal_enabled=0, 退出"; exit 0; }
-    log "daemon: 启动 thermal_enabled=1"
+    local chg_auto online prev_online last_w cur_w
+    if [ "$(daemon_needed)" != "1" ]; then
+        log "daemon: 温控/待机/充电均关闭, 退出"
+        exit 0
+    fi
+    log "daemon: 启动 thermal_enabled=$(get_conf thermal_enabled 1) screen_auto=$(get_conf screen_auto 1) charge_auto=$(get_conf charge_auto 0)"
+    prev_online=""
+    last_w=""
     while :; do
         limit=$(get_conf thermal_limit 40)
         recover=$(get_conf thermal_recover 37)
         poll=$(get_conf poll_ms 5000)
         profile=$(get_conf profile balanced)
-        screen_auto=$(get_conf screen_auto 1)
+        en=$(get_conf thermal_enabled 1)
+        sa=$(get_conf screen_auto 1)
+        ca=$(get_conf charge_auto 0)
         temp=$(read_temp_raw)
         override="0"; screen="0"; prev_profile="$profile"; prev_applied="$profile"
         # 读取守护上次写入的状态
@@ -376,41 +492,45 @@ daemon_loop() {
         [ -z "$override" ] && override="0"
         [ -z "$screen" ] && screen="0"
         [ -z "$prev_applied" ] && prev_applied="$profile"
-        # 用户手动切换档位 -> 重置守护状态, 以新档为基准重新评估
-        if [ "$profile" != "$prev_profile" ]; then
-            override=0; screen=0
-            log "daemon: 检测到档位切换 -> $profile, 重置守护状态"
-        fi
-        # 计算新温控状态(带迟滞: 升温到 limit 触发, 降温到 recover 解除)
-        new_override="$override"
-        if [ "$temp" -gt 0 ] && [ "$profile" != "thermal" ]; then
-            if [ "$temp" -ge $((limit * 10)) ] && [ "$new_override" != "1" ]; then
-                new_override=1
-                logmsg="daemon: 过热 $(fmt_temp $temp)°C >= ${limit}°C, 进入 thermal 档"
-            elif [ "$temp" -le $((recover * 10)) ] && [ "$new_override" = "1" ]; then
-                new_override=0
-                logmsg="daemon: 回落 $(fmt_temp $temp)°C <= ${recover}°C, 解除温控降档"
+        # 温控与待机仅在各自开关开启时管理; 否则复位状态, 交由用户档位
+        if [ "$en" != "1" ]; then new_override="0"; new_screen="0"; screen_auto="0"
+        else
+            # 用户手动切换档位 -> 重置守护状态, 以新档为基准重新评估
+            if [ "$profile" != "$prev_profile" ]; then
+                override=0; screen=0
+                log "daemon: 检测到档位切换 -> $profile, 重置守护状态"
             fi
-        fi
-        # 计算待机状态
-        new_screen="$screen"
-        if [ "$screen_auto" = "1" ]; then
-            screen_on=$(screen_is_on)
-            if [ "$screen_on" = "0" ]; then
-                # 灭屏且未处于温控降档 -> 进入待机省电
-                if [ "$new_override" != "1" ] && [ "$new_screen" != "1" ]; then
-                    new_screen=1
-                    logmsg="daemon: 屏幕熄灭, 进入待机超级省电"
+            # 计算新温控状态(带迟滞: 升温到 limit 触发, 降温到 recover 解除)
+            new_override="$override"
+            if [ "$temp" -gt 0 ] && [ "$profile" != "thermal" ]; then
+                if [ "$temp" -ge $((limit * 10)) ] && [ "$new_override" != "1" ]; then
+                    new_override=1
+                    logmsg="daemon: 过热 $(fmt_temp $temp)°C >= ${limit}°C, 进入 thermal 档"
+                elif [ "$temp" -le $((recover * 10)) ] && [ "$new_override" = "1" ]; then
+                    new_override=0
+                    logmsg="daemon: 回落 $(fmt_temp $temp)°C <= ${recover}°C, 解除温控降档"
+                fi
+            fi
+            # 计算待机状态
+            new_screen="$screen"
+            if [ "$sa" = "1" ]; then
+                screen_on=$(screen_is_on)
+                if [ "$screen_on" = "0" ]; then
+                    # 灭屏且未处于温控降档 -> 进入待机省电
+                    if [ "$new_override" != "1" ] && [ "$new_screen" != "1" ]; then
+                        new_screen=1
+                        logmsg="daemon: 屏幕熄灭, 进入待机超级省电"
+                    fi
+                else
+                    # 亮屏 -> 解除待机省电
+                    if [ "$new_screen" = "1" ]; then
+                        new_screen=0
+                        logmsg="daemon: 屏幕点亮, 退出待机省电"
+                    fi
                 fi
             else
-                # 亮屏 -> 解除待机省电
-                if [ "$new_screen" = "1" ]; then
-                    new_screen=0
-                    logmsg="daemon: 屏幕点亮, 退出待机省电"
-                fi
+                new_screen=0
             fi
-        else
-            new_screen=0
         fi
         # 计算实际生效档位: 温控 > 待机 > 用户档
         desired="$profile"
@@ -420,7 +540,27 @@ daemon_loop() {
             apply_profile "$desired" >/dev/null 2>&1
             log "$logmsg (-> $desired)"
         fi
-        echo "{\"profile\":\"$profile\",\"override\":\"$new_override\",\"screen\":\"$new_screen\",\"applied\":\"$desired\",\"temperature\":\"$temp\",\"limit\":\"$limit\",\"recover\":\"$recover\",\"ts\":\"$(date +%s)\"}" > "$STATE"
+        # 充电功率自动调节
+        if [ "$ca" = "1" ]; then
+            online=$(charge_online)
+            if [ "$online" = "1" ]; then
+                # 插电中: 按当前温度求请求功率, 变化时写入
+                cur_w=$(charge_power_for_temp "$temp" "$(get_conf charge_target_w 90)")
+                if [ "$cur_w" != "$last_w" ] || [ "$online" != "$prev_online" ]; then
+                    apply_charge_power_w "$cur_w"
+                    log "daemon: 插电自动调节 -> ${cur_w}W (temp $(fmt_temp $temp)°C)"
+                    last_w="$cur_w"
+                fi
+            elif [ "$online" != "$prev_online" ]; then
+                log "daemon: 已拔出电源, 停止自动充电调节"
+                last_w=""
+            fi
+            prev_online="$online"
+        else
+            prev_online=""
+            last_w=""
+        fi
+        echo "{\"profile\":\"$profile\",\"override\":\"$new_override\",\"screen\":\"$new_screen\",\"applied\":\"$desired\",\"temperature\":\"$temp\",\"limit\":\"$limit\",\"recover\":\"$recover\",\"chg_auto\":\"$ca\",\"charging\":\"${online:-0}\",\"chg_w\":\"${cur_w:-0}\",\"ts\":\"$(date +%s)\"}" > "$STATE"
         chmod 600 "$STATE" 2>/dev/null
         # poll 秒数(下限 1)
         if [ "$poll" -lt 1000 ] 2>/dev/null; then sec=1
@@ -495,10 +635,13 @@ get_status() {
     pct=$(profile_pct "$applied" 1); mid=$pct
     pct=$(profile_pct "$applied" 2); big=$pct
     # 充电状态
-    local charge_limit charge_current charge_voltage
+    local charge_limit charge_current charge_voltage charge_auto charge_target_w charge_power_w
     charge_limit=$(get_conf charge_limit 1)
     charge_current=$(get_conf charge_current 3000000)
     charge_voltage=$(get_conf charge_voltage 4400000)
+    charge_auto=$(get_conf charge_auto 0)
+    charge_target_w=$(get_conf charge_target_w 90)
+    charge_power_w=$(get_conf charge_power_w "")
     # 尝试读取实际充电参数
     local actual_current actual_voltage
     [ -r "$SYS/class/power_supply/battery/current_max" ] && \
@@ -507,7 +650,10 @@ get_status() {
         actual_voltage=$(cat "$SYS/class/power_supply/battery/voltage_max" 2>/dev/null)
     [ -z "$actual_current" ] && actual_current="$charge_current"
     [ -z "$actual_voltage" ] && actual_voltage="$charge_voltage"
-    echo "{\"profile\":\"$profile\",\"applied\":\"$applied\",\"override\":\"$override\",\"screen\":\"$screen\",\"screen_auto\":\"$screen_auto\",\"temperature\":\"$temp\",\"thermal_enabled\":\"$en\",\"thermal_limit\":\"$limit\",\"thermal_recover\":\"$recover\",\"little_pct\":\"$little\",\"mid_pct\":\"$mid\",\"big_pct\":\"$big\",\"daemon\":\"$alive\",\"charge_limit\":\"$charge_limit\",\"charge_current\":\"$actual_current\",\"charge_voltage\":\"$actual_voltage\"}"
+    # 充电在线状态(仅诊断时读取)
+    local charging
+    charging=$(charge_online)
+    echo "{\"profile\":\"$profile\",\"applied\":\"$applied\",\"override\":\"$override\",\"screen\":\"$screen\",\"screen_auto\":\"$screen_auto\",\"temperature\":\"$temp\",\"thermal_enabled\":\"$en\",\"thermal_limit\":\"$limit\",\"thermal_recover\":\"$recover\",\"little_pct\":\"$little\",\"mid_pct\":\"$mid\",\"big_pct\":\"$big\",\"daemon\":\"$alive\",\"charge_limit\":\"$charge_limit\",\"charge_auto\":\"$charge_auto\",\"charge_target_w\":\"$charge_target_w\",\"charge_power_w\":\"$charge_power_w\",\"charging\":\"$charging\",\"charge_current\":\"$actual_current\",\"charge_voltage\":\"$actual_voltage\"}"
 }
 
 # ---------------- 入口 ----------------
@@ -590,14 +736,14 @@ case "$CMD" in
         ;;
     boot)
         init
-        en=$(get_conf thermal_enabled 1)
         boot_apply=$(get_conf boot_apply 1)
         if [ "$boot_apply" = "1" ]; then
             profile=$(get_conf profile balanced)
             apply_profile "$profile" >/dev/null 2>&1
             echo "boot: applied $profile"
         fi
-        if [ "$en" = "1" ]; then
+        # 温控/待机/充电任一开启则拉起守护
+        if [ "$(daemon_needed)" = "1" ]; then
             start_daemon
         fi
         ;;
@@ -625,21 +771,24 @@ case "$CMD" in
         cat "$CONF" 2>/dev/null
         ;;
     charge_fast)
-        # 快速充电模式 (提升电流和电压)
-        # 目标: ~90W (理论值, 按电池端 4.4V 折算电流 ~20.45A)
-        # 实际功率取决于充电器/线缆/接口与充电IC上限, 软件无法突破硬件物理限制
+        # 快速充电模式: 开启插电自动调节
+        # 用法: charge_fast [目标功率W]  (默认 90, 范围 75~90)
+        # 插电后按电池温度自动在 75W~目标W 之间调节, 最低保持 75W
         init
-        target_current="${2:-20450000}"  # 20.45A = 20450000uA (90W @4.4V)
-        target_voltage="${3:-4400000}"   # 4.4V = 4400000uV
-        set_charge_current "$target_current"
-        set_charge_voltage "$target_voltage"
-        toggle_charge_limit 1
-        set_conf charge_current "$target_current"
-        set_conf charge_voltage "$target_voltage"
-        echo "fast charge enabled: ${target_current}uA / ${target_voltage}uV (~90W 理论)"
+        target_w="${2:-$(get_conf charge_target_w 90)}"
+        case "$target_w" in ''|*[!0-9]*)
+            echo "invalid target watt"; exit 1 ;; esac
+        if [ "$target_w" -lt 75 ] 2>/dev/null || [ "$target_w" -gt 90 ] 2>/dev/null; then
+            echo "target watt must be 75~90"; exit 1
+        fi
+        set_conf charge_target_w "$target_w"
+        set_conf charge_auto 1
+        update_daemon
+        apply_charge_auto_once
+        echo "fast charge enabled: target=${target_w}W (插电自动 75~${target_w}W 按温度调节)"
         ;;
     charge_normal)
-        # 正常充电模式 (恢复默认)
+        # 正常充电模式: 关闭自动调节并恢复默认电流电压
         init
         norm_current="${2:-2000000}"    # 2A = 2000000uA
         norm_voltage="${3:-4200000}"    # 4.2V = 4200000uV
@@ -648,7 +797,10 @@ case "$CMD" in
         toggle_charge_limit 1
         set_conf charge_current "$norm_current"
         set_conf charge_voltage "$norm_voltage"
-        echo "normal charge restored: ${norm_current}uA / ${norm_voltage}uV"
+        set_conf charge_auto 0
+        set_conf charge_power_w ""
+        update_daemon
+        echo "normal charge restored: ${norm_current}uA / ${norm_voltage}uV (自动调节已关闭)"
         ;;
     get)
         init
@@ -662,7 +814,7 @@ case "$CMD" in
             thermal_enabled)
                 case "$V" in 0|1) set_conf "$K" "$V" ;;
                     *) echo "invalid value(0/1)"; exit 1 ;; esac
-                if [ "$V" = "1" ]; then start_daemon; else stop_daemon; fi
+                update_daemon
                 ;;
             profile)
                 case "$V" in balanced|powersave|thermal|performance)
@@ -677,8 +829,28 @@ case "$CMD" in
             screen_auto)
                 case "$V" in 0|1) set_conf "$K" "$V" ;;
                     *) echo "invalid value(0/1)"; exit 1 ;; esac
-                # 若开启且 daemon 未运行, 拉起守护
-                if [ "$V" = "1" ]; then start_daemon; fi
+                update_daemon
+                ;;
+            charge_auto)
+                case "$V" in 0|1) set_conf "$K" "$V" ;;
+                    *) echo "invalid value(0/1)"; exit 1 ;; esac
+                if [ "$V" = "1" ]; then
+                    update_daemon
+                    apply_charge_auto_once
+                else
+                    update_daemon
+                fi
+                ;;
+            charge_target_w)
+                case "$V" in ''|*[!0-9]*)
+                    echo "invalid value, need number (W 75~90)"; exit 1 ;; esac
+                if [ "$V" -lt 75 ] 2>/dev/null || [ "$V" -gt 90 ] 2>/dev/null; then
+                    echo "target watt must be 75~90"; exit 1
+                fi
+                set_conf "$K" "$V"
+                if [ "$(get_conf charge_auto 0)" = "1" ]; then
+                    apply_charge_auto_once
+                fi
                 ;;
             charge_limit)
                 case "$V" in 0|1)

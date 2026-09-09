@@ -185,28 +185,46 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
 <div class="card">
   <div class="row">
     <div class="label">
-      <div class="t">快速充电模式</div>
-      <div class="s">提升充电电流与电压，目标约 90W</div>
+      <div class="t">智能快充（插电自动）</div>
+      <div class="s">插上电源自动按电池温度调节功率</div>
     </div>
-    <label class="sw"><input type="checkbox" id="chargeFast"><span class="slider"></span></label>
+    <label class="sw"><input type="checkbox" id="chargeAuto"><span class="slider"></span></label>
+  </div>
+  <div class="row" style="padding-bottom:2px">
+    <div class="label">
+      <div class="t">目标功率</div>
+      <div class="s">温度 ≤36°C 给满功率，越高越降，最低保底 75W</div>
+    </div>
+    <div class="val range-val" id="chargeTargetVal">90W</div>
+  </div>
+  <div class="slider-wrap">
+    <input type="range" id="chargeTargetSlider" min="75" max="90" step="1" value="90">
+    <div class="range-lbl"><span>75W</span><span id="targetMid">82</span><span>90W</span></div>
   </div>
   <div class="row">
     <div class="label">
-      <div class="t">充电电流限制</div>
+      <div class="t">当前状态</div>
+      <div class="s">请求: <span id="chargePowerDisplay">--</span> · 充电器: <span id="chargeOnline">--</span></div>
+    </div>
+    <div class="val" id="chargeStateVal">--</div>
+  </div>
+  <div class="row">
+    <div class="label">
+      <div class="t">充电电流</div>
       <div class="s">当前: <span id="chargeCurrentDisplay">--</span>A</div>
     </div>
     <div class="val" id="chargeCurrentVal">--</div>
   </div>
   <div class="row">
     <div class="label">
-      <div class="t">充电电压限制</div>
+      <div class="t">充电电压</div>
       <div class="s">当前: <span id="chargeVoltageDisplay">--</span>V</div>
     </div>
     <div class="val" id="chargeVoltageVal">--</div>
   </div>
   <div style="padding:12px 16px;border-top:1px solid #ffffff0a">
-    <button class="btn ghost" id="btnChargeFast" style="width:100%;font-size:13px">启用快速充电</button>
-    <button class="btn ghost" id="btnChargeNormal" style="width:100%;margin-top:8px;font-size:13px">恢复默认充电</button>
+    <button class="btn ghost" id="btnChargeFast" style="width:100%;font-size:13px">应用目标功率（立即）</button>
+    <button class="btn ghost" id="btnChargeNormal" style="width:100%;margin-top:8px;font-size:13px">关闭智能快充 / 恢复默认</button>
   </div>
 </div>
 
@@ -290,11 +308,25 @@ function render(data){
   // 充电状态
   const chargeCurrent = parseInt(data.charge_current||'0');
   const chargeVoltage = parseInt(data.charge_voltage||'0');
+  const chargeAuto = data.charge_auto === '1';
+  const charging = data.charging === '1';
+  const chgW = parseInt(data.charge_power_w||'0');
+  const targetW = parseInt(data.charge_target_w||'90');
   $('#chargeCurrentDisplay').textContent = (chargeCurrent/1000000).toFixed(1);
   $('#chargeVoltageDisplay').textContent = (chargeVoltage/1000000).toFixed(1);
   $('#chargeCurrentVal').textContent = chargeCurrent > 0 ? (chargeCurrent/1000000).toFixed(1)+'A' : '--';
   $('#chargeVoltageVal').textContent = chargeVoltage > 0 ? (chargeVoltage/1000000).toFixed(1)+'V' : '--';
-  $('#chargeFast').checked = data.charge_limit === '1';
+  $('#chargeAuto').checked = chargeAuto;
+  $('#chargeTargetSlider').value = targetW;
+  $('#chargeTargetVal').textContent = targetW+'W';
+  syncChargeSliderFill();
+  $('#chargeOnline').textContent = charging ? '已连接' : '未插电';
+  $('#chargePowerDisplay').textContent = chargeAuto
+      ? (chgW > 0 ? chgW+'W' : '待插电')
+      : '已关闭';
+  $('#chargeStateVal').textContent = !chargeAuto ? '已关闭'
+      : charging ? (chgW > 0 ? chgW+'W / 目标'+targetW+'W' : '待插电')
+      : '未插电';
 
   // 档位高亮
   document.querySelectorAll('.profile').forEach(el=>{
@@ -310,6 +342,14 @@ function syncSliderFills(){
   rs.style.setProperty('--fill', rf+'%');
   $('#limitVal').textContent = ls.value+'°C';
   $('#recoverVal').textContent = rs.value+'°C';
+}
+
+function syncChargeSliderFill(){
+  const cs=$('#chargeTargetSlider');
+  const cf=((cs.value-cs.min)/(cs.max-cs.min))*100;
+  cs.style.setProperty('--fill', cf+'%');
+  $('#chargeTargetVal').textContent = cs.value+'W';
+  $('#targetMid').textContent = (parseInt(cs.min)+parseInt(cs.max))>>1;
 }
 
 async function refresh(){
@@ -345,6 +385,7 @@ async function applyRecoverSlider(){
 
 async function init(){
   syncSliderFills();
+  syncChargeSliderFill();
   document.querySelectorAll('.profile').forEach(el=>{
     el.addEventListener('click', ()=>applyProfile(el.dataset.p));
   });
@@ -379,20 +420,35 @@ async function init(){
   });
 
   // 充电控制
-  $('#chargeFast').addEventListener('change', async e=>{
-    if(e.target.checked){
-      await sh(`${ENG} charge_fast`);
-      toast('快速充电已启用');
+  $('#chargeAuto').addEventListener('change', async e=>{
+    const on = e.target.checked;
+    if(on){
+      await sh(`${ENG} charge_fast ${$('#chargeTargetSlider').value}`);
+      toast('智能快充已开启：插电自动 75~' + $('#chargeTargetSlider').value + 'W');
+    } else {
+      await sh(`${ENG} charge_normal`);
+      toast('智能快充已关闭');
     }
+    refresh();
+  });
+  $('#chargeTargetSlider').addEventListener('input', e=>{
+    syncChargeSliderFill();
+  });
+  $('#chargeTargetSlider').addEventListener('change', async e=>{
+    await sh(`${ENG} set charge_target_w ${e.target.value}`);
+    setStatus('目标功率已设为 '+e.target.value+'W');
+    if($('#chargeAuto').checked) await sh(`${ENG} charge_fast ${e.target.value}`);
+    refresh();
   });
   $('#btnChargeFast').addEventListener('click', async ()=>{
-    await sh(`${ENG} charge_fast`);
-    toast('快速充电已启用');
+    const w = $('#chargeTargetSlider').value;
+    await sh(`${ENG} charge_fast ${w}`);
+    toast('已应用：插电自动 75~'+w+'W');
     refresh();
   });
   $('#btnChargeNormal').addEventListener('click', async ()=>{
     await sh(`${ENG} charge_normal`);
-    toast('已恢复默认充电');
+    toast('已关闭智能快充并恢复默认');
     refresh();
   });
   $('#btnChargeStatus').addEventListener('click', async ()=>{

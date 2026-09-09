@@ -2,7 +2,7 @@
 
 ## 重要提示：硬件限制
 
-**模块已将快速充电目标调整为 ~90W，但实际功率取决于充电器/线缆/接口与充电IC上限，软件无法突破硬件物理限制。**
+**模块的智能快充在 75W~90W 之间按电池温度自动调节，最低保底 75W。实际功率仍取决于充电器/线缆/接口与充电IC上限，软件无法突破硬件物理限制。**
 
 可能的原因：
 1. 充电器本身功率不足（可能不是原装或已损坏）
@@ -15,19 +15,31 @@
 模块新增了充电控制实验性功能：
 
 ### WebUI 界面
-- 快速充电开关
-- 充电电流/电压显示
+- 智能快充开关（插电自动按温度调节）
+- 目标功率滑杆（75~90W）
+- 实时请求功率 / 充电器连接状态 / 电流电压显示
 - 充电路径诊断
+
+### 自动调节逻辑
+- 电池温度 **≤ 36°C**：按目标功率请求（最高 90W）
+- 电池温度 **升高**：请求功率线性下降
+- 电池温度 **≥ 46°C**：降到最低并**保底 75W**，温度回落自动恢复目标
 
 ### 命令行
 ```sh
 # 查看充电路径
 su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_status"
 
-# 启用快速充电（20.45A / 4.4V，理论 ~90W）
+# 开启智能快充(默认目标 90W, 插电自动在 75~90W 间按温度调节)
 su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_fast"
 
-# 恢复默认充电（2.0A / 4.2V）
+# 指定目标功率 75~90W 例如 85W
+su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_fast 85"
+
+# 调整目标功率
+su -c "sh /data/adb/modules/battery-cooler/engine.sh set charge_target_w 82"
+
+# 关闭智能快充, 恢复默认充电（2.0A / 4.2V）
 su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_normal"
 ```
 
@@ -47,18 +59,18 @@ su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_normal"
    su -c "sh /data/adb/modules/battery-cooler/diagnose.sh"
    ```
 
-3. **手动测试不同电流值**
+3. **观察自动调节效果**
    ```sh
-   # 尝试 3A
-   su -c "sh /data/adb/modules/battery-cooler/engine.sh charge_fast 3000000"
-   # 观察充电功率变化
+   # 查看当前请求电流/电压与实际充电功率
+   su -c "sh /data/adb/modules/battery-cooler/engine.sh get"
    cat /sys/class/power_supply/battery/current_now
    cat /sys/class/power_supply/battery/voltage_now
    ```
 
 ## 预期结果
 
-- 如果硬件支持 90W 充电：软件提升后功率会增加
+- 插上支持快充的电源且温度较低：软件会按目标(最高 90W)请求，实际功率取决于硬件
+- 电池温度升高：请求功率自动下降，最低保持 75W，温度回落自动恢复
 - 如果硬件限制更低（如 35W）：软件提升无效，功率不变
 
 ## 下一步
