@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>省电与限制发烫</title>
+<style>
+:root{
+  --c-primary:#34d399;
+  --c-warn:#f59e0b;
+  --c-danger:#f87171;
+  --bg:#101014;
+  --card:#1c1c23;
+  --card2:#24242d;
+  --text:#f2f2f5;
+  --text-sub:#9a9aa5;
+  --radius:16px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;padding:16px 14px 40px;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
+.header{display:flex;align-items:center;gap:10px;margin:6px 2px 16px}
+.header h1{font-size:21px;font-weight:700;margin:0;letter-spacing:.3px}
+.header .sub{color:var(--text-sub);font-size:12px;margin-top:2px}
+
+/* 温度概览卡 */
+.hero{background:linear-gradient(145deg,#1e1e28,#17171f);border-radius:var(--radius);
+  padding:18px;margin-bottom:14px;display:flex;align-items:center;gap:16px;
+  border:1px solid #ffffff10}
+.hero .temp-big{font-size:44px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums}
+.hero .temp-big small{font-size:20px;font-weight:600;color:var(--text-sub)}
+.hero .meta{flex:1}
+.hero .meta .lbl{color:var(--text-sub);font-size:12px;margin-bottom:4px}
+.hero .pill{display:inline-flex;align-items:center;gap:5px;font-size:12px;
+  padding:4px 10px;border-radius:999px;font-weight:600}
+.pill.ok{background:#0f2e22;color:var(--c-primary)}
+.pill.hot{background:#3a2410;color:var(--c-warn)}
+.pill.limit{background:#3a1420;color:var(--c-danger)}
+
+/* 档位选择 */
+.profiles{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+.profile{background:var(--card);border:2px solid transparent;border-radius:var(--radius);
+  padding:14px;cursor:pointer;transition:.15s;position:relative}
+.profile:active{transform:scale(.97)}
+.profile.active{border-color:var(--c-primary);background:var(--card2)}
+.profile .name{font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px}
+.profile .desc{color:var(--text-sub);font-size:11.5px;margin-top:6px;line-height:1.5}
+.profile .tag{font-size:10.5px;color:#0f0f13;background:var(--c-primary);padding:2px 8px;
+  border-radius:999px;font-weight:800}
+.profile.thermal .tag{background:var(--c-danger)}
+
+/* 分段标题 */
+.sec{display:flex;align-items:center;justify-content:space-between;margin:20px 2px 10px}
+.sec .t{font-size:13px;color:var(--text-sub);font-weight:700;letter-spacing:.5px}
+
+/* 卡片列表 */
+.card{background:var(--card);border-radius:var(--radius);overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:14px 16px}
+.row + .row{border-top:1px solid #ffffff0a}
+.row .label{flex:1}
+.row .label .t{font-size:14.5px;font-weight:600}
+.row .label .s{font-size:12px;color:var(--text-sub);margin-top:2px}
+.row .val{color:var(--text-sub);font-size:13px;font-weight:600}
+
+/* 开关 */
+.sw{position:relative;width:52px;height:30px;flex-shrink:0}
+.sw input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;background:#3a3a44;border-radius:999px;transition:.2s;cursor:pointer}
+.slider:before{content:"";position:absolute;width:24px;height:24px;left:3px;top:3px;
+  background:#fff;border-radius:50%;transition:.2s}
+.sw input:checked + .slider{background:var(--c-primary)}
+.sw input:checked + .slider:before{transform:translateX(22px)}
+
+/* 滑杆 */
+.slider-wrap{padding:4px 16px 16px}
+input[type=range]{width:100%;-webkit-appearance:none;appearance:none;height:6px;border-radius:99px;
+  background:linear-gradient(90deg,var(--c-primary) var(--fill,50%),#3a3a44 var(--fill,50%));outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;
+  background:#fff;border:3px solid var(--c-primary);cursor:pointer}
+.range-lbl{display:flex;justify-content:space-between;color:var(--text-sub);font-size:11px;padding:0 2px;margin-top:8px}
+.range-val{font-size:15px;font-weight:800;color:var(--c-primary)}
+
+/* 按钮 */
+.btn{width:100%;padding:14px;border:0;border-radius:14px;background:var(--c-primary);
+  color:#08130e;font-size:15px;font-weight:800;cursor:pointer;margin-top:14px}
+.btn:active{transform:scale(.98)}
+.btn.ghost{background:#26262f;color:var(--text);border:1px solid #ffffff14}
+
+.foot{color:#5a5a66;font-size:11px;text-align:center;margin-top:22px;line-height:1.7}
+.toastfix{margin-top:8px}
+.log-card{background:#0d0d12;border-radius:12px;padding:12px 14px;margin-top:10px;
+  font-family:ui-monospace,monospace;font-size:11px;color:#7ee0a3;max-height:150px;overflow:auto;white-space:pre-wrap}
+.badge-lim{font-size:10px;background:#ffffff12;color:var(--text-sub);padding:2px 6px;border-radius:6px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>⚡ 省电与限制发烫</h1>
+    <div class="sub">多档位性能调度 · KernelSU 模块</div>
+  </div>
+</div>
+
+<!-- 温度概览 -->
+<div class="hero">
+  <div class="temp-big" id="tempBig">--<small>°C</small></div>
+  <div class="meta">
+    <div class="lbl">当前最高温度</div>
+    <span class="pill ok" id="tempPill">读取中…</span>
+    <div style="font-size:11.5px;color:var(--text-sub);margin-top:8px">
+      温度墙 <span id="wallNow">40</span>°C · 触发后自动压至「发烫限制」档
+    </div>
+  </div>
+</div>
+
+<!-- 档位 -->
+<div class="profiles" id="profiles">
+  <div class="profile" data-p="balanced">
+    <div class="name">🌿 均衡</div>
+    <div class="desc">默认档，兼顾续航与流畅，日常推荐。</div>
+  </div>
+  <div class="profile" data-p="powersave">
+    <div class="name">🔋 超级省电 <span class="tag">省电</span></div>
+    <div class="desc">小核 80% / 大核 55%，冻结限制后台，续航优先。</div>
+  </div>
+  <div class="profile" data-p="thermal">
+    <div class="name">🧊 发烫限制 <span class="tag">降温</span></div>
+    <div class="desc">主动压低频率 45%~60%，快速降温护板。</div>
+  </div>
+  <div class="profile" data-p="performance">
+    <div class="name">🚀 性能模式</div>
+    <div class="desc">满血释放，适合大型游戏。注意发热。</div>
+  </div>
+</div>
+
+<div class="sec"><span class="t">温控策略</span></div>
+<div class="card">
+  <div class="row">
+    <div class="label">
+      <div class="t">智能温控守护</div>
+      <div class="s">温度超过温度墙时自动降频，回落恢复</div>
+    </div>
+    <label class="sw"><input type="checkbox" id="thermalEnabled"><span class="slider"></span></label>
+  </div>
+</div>
+
+<div class="sec"><span class="t">温度墙</span></div>
+<div class="card">
+  <div class="row" style="padding-bottom:2px">
+    <div class="label">
+      <div class="t">触发温度</div>
+      <div class="s">建议 41~45°C</div>
+    </div>
+    <div class="val range-val" id="limitVal">40°C</div>
+  </div>
+  <div class="slider-wrap">
+    <input type="range" id="limitSlider" min="38" max="48" step="1" value="40">
+    <div class="range-lbl"><span>38</span><span>40</span><span>48</span></div>
+  </div>
+  <div class="row">
+    <div class="label">
+      <div class="t">恢复温度</div>
+      <div class="s">降到该值后解除降频</div>
+    </div>
+    <div class="val range-val" id="recoverVal">37°C</div>
+  </div>
+  <div class="slider-wrap">
+    <input type="range" id="recoverSlider" min="35" max="45" step="1" value="37">
+    <div class="range-lbl"><span>35</span><span>37</span><span>45</span></div>
+  </div>
+</div>
+
+<button class="btn" id="btnApply">立即应用当前档位</button>
+<button class="btn ghost" id="btnRestore" style="margin-top:10px">一键恢复：均衡 + 关闭温控守护</button>
+
+<div class="sec"><span class="t">充电控制</span></div>
+<div class="card">
+  <div class="row">
+    <div class="label">
+      <div class="t">快速充电模式</div>
+      <div class="s">提升充电电流与电压，目标约 75W</div>
+    </div>
+    <label class="sw"><input type="checkbox" id="chargeFast"><span class="slider"></span></label>
+  </div>
+  <div class="row">
+    <div class="label">
+      <div class="t">充电电流限制</div>
+      <div class="s">当前: <span id="chargeCurrentDisplay">--</span>A</div>
+    </div>
+    <div class="val" id="chargeCurrentVal">--</div>
+  </div>
+  <div class="row">
+    <div class="label">
+      <div class="t">充电电压限制</div>
+      <div class="s">当前: <span id="chargeVoltageDisplay">--</span>V</div>
+    </div>
+    <div class="val" id="chargeVoltageVal">--</div>
+  </div>
+  <div style="padding:12px 16px;border-top:1px solid #ffffff0a">
+    <button class="btn ghost" id="btnChargeFast" style="width:100%;font-size:13px">启用快速充电</button>
+    <button class="btn ghost" id="btnChargeNormal" style="width:100%;margin-top:8px;font-size:13px">恢复默认充电</button>
+  </div>
+</div>
+
+<div class="sec"><span class="t">充电诊断</span></div>
+<div class="card">
+  <div class="row" style="flex-wrap:wrap;gap:8px">
+    <button class="btn ghost" id="btnChargeStatus" style="flex:1;min-width:120px;font-size:12.5px">查看充电路径</button>
+  </div>
+  <pre id="chargeDiag" style="display:none;margin:12px 16px;font-size:11px;color:var(--text-sub);white-space:pre-wrap;word-break:break-all"></pre>
+</div>
+
+<div class="toastfix" id="statusText" style="font-size:12.5px;color:var(--text-sub);text-align:center;margin-top:12px"></div>
+
+<div class="foot">
+  本模块通过 sysfs 限制 CPU 最高频率实现省电与控温，<br>
+  充电控制为实验性功能，实际功率受硬件限制。<br>
+  仅在受支持的内核节点上生效，不影响系统文件。
+</div>
+
+<script src="js/kernelsu.js"></script>
+<script>
+const { exec, toast } = window.kernelsu;
+
+const $ = s => document.querySelector(s);
+const MODDIR = '/data/adb/modules/battery-cooler';
+const ENG = `${MODDIR}/engine.sh`;
+
+const PROFILES = {
+  balanced:    { name:'均衡',     pct:'小核 100% / 大核 100%' },
+  powersave:   { name:'超级省电', pct:'小核 80% / 大核 55%' },
+  thermal:     { name:'发烫限制', pct:'小核 60% / 大核 40%' },
+  performance: { name:'性能模式', pct:'小核 100% / 大核 100%' },
+};
+
+let current = null;
+let busy = false;
+
+async function sh(cmd, silent=false){
+  try{
+    const r = await exec(cmd);
+    const out = (r.stdout||'').trim();
+    if(!silent && out) setStatus(out.split('\n').pop());
+    return r;
+  }catch(e){
+    setStatus('执行失败: '+e.message, true);
+    return null;
+  }
+}
+
+function fmtC(dec){ return dec>0 ? (dec/10).toFixed(1) : '--'; }
+
+function setStatus(msg, isErr=false){
+  const el = $('#statusText');
+  el.style.color = isErr ? 'var(--c-danger)' : 'var(--text-sub)';
+  el.textContent = msg;
+}
+
+function render(data){
+  current = data;
+  // 温度
+  const t = parseInt(data.temperature||'0');
+  $('#tempBig').innerHTML = fmtC(t) + '<small>°C</small>';
+  const pill = $('#tempPill');
+  const limit = parseInt(data.thermal_limit||'40');
+  const over = data.override === '1';
+  if(over){ pill.className='pill limit'; pill.textContent='⛔ 正在降频限制'; }
+  else if(t > 0 && t >= limit*10){ pill.className='pill hot'; pill.textContent='⚠ 接近温度墙'; }
+  else if(t > 0 && t >= (limit*10-30)){ pill.className='pill hot'; pill.textContent='温度偏高'; }
+  else { pill.className='pill ok'; pill.textContent='● 温度正常'; }
+
+  $('#thermalEnabled').checked = data.thermal_enabled === '1';
+  $('#limitSlider').value = data.thermal_limit||40;
+  $('#recoverSlider').value = data.thermal_recover||37;
+  syncSliderFills();
+  $('#wallNow').textContent = data.thermal_limit||40;
+
+  // 充电状态
+  const chargeCurrent = parseInt(data.charge_current||'0');
+  const chargeVoltage = parseInt(data.charge_voltage||'0');
+  $('#chargeCurrentDisplay').textContent = (chargeCurrent/1000000).toFixed(1);
+  $('#chargeVoltageDisplay').textContent = (chargeVoltage/1000000).toFixed(1);
+  $('#chargeCurrentVal').textContent = chargeCurrent > 0 ? (chargeCurrent/1000000).toFixed(1)+'A' : '--';
+  $('#chargeVoltageVal').textContent = chargeVoltage > 0 ? (chargeVoltage/1000000).toFixed(1)+'V' : '--';
+  $('#chargeFast').checked = data.charge_limit === '1';
+
+  // 档位高亮
+  document.querySelectorAll('.profile').forEach(el=>{
+    el.classList.toggle('active', el.dataset.p === data.profile);
+  });
+}
+
+function syncSliderFills(){
+  const ls=$('#limitSlider'), rs=$('#recoverSlider');
+  const lf=((ls.value-ls.min)/(ls.max-ls.min))*100;
+  const rf=((rs.value-rs.min)/(rs.max-rs.min))*100;
+  ls.style.setProperty('--fill', lf+'%');
+  rs.style.setProperty('--fill', rf+'%');
+  $('#limitVal').textContent = ls.value+'°C';
+  $('#recoverVal').textContent = rs.value+'°C';
+}
+
+async function refresh(){
+  const r = await sh(`${ENG} get`, true);
+  if(!r || r.errno!==0){ setStatus('无法读取模块状态，请确认已安装且已授予 root', true); return; }
+  try{
+    render(JSON.parse(r.stdout));
+  }catch(e){
+    // 兼容引擎输出异常
+    setStatus('状态解析失败', true);
+  }
+}
+
+async function applyProfile(p){
+  if(busy) return;
+  busy = true;
+  await sh(`${ENG} apply ${p}`);
+  await refresh();
+  toast('已切换: '+PROFILES[p].name);
+  busy = false;
+}
+
+async function applyLimitSlider(){
+  const v = $('#limitSlider').value;
+  await sh(`${ENG} set thermal_limit ${v}`);
+  refresh();
+}
+async function applyRecoverSlider(){
+  const v = $('#recoverSlider').value;
+  await sh(`${ENG} set thermal_recover ${v}`);
+  refresh();
+}
+
+async function init(){
+  syncSliderFills();
+  document.querySelectorAll('.profile').forEach(el=>{
+    el.addEventListener('click', ()=>applyProfile(el.dataset.p));
+  });
+  $('#thermalEnabled').addEventListener('change', async e=>{
+    await sh(`${ENG} set thermal_enabled ${e.target.checked?1:0}`);
+    setStatus(e.target.checked? '温控守护已开启':'温控守护已关闭');
+  });
+  $('#limitSlider').addEventListener('input', e=>{
+    syncSliderFills();
+    clearTimeout(window.__t1);
+    window.__t1 = setTimeout(applyLimitSlider, 600);
+  });
+  $('#recoverSlider').addEventListener('input', e=>{
+    syncSliderFills();
+    clearTimeout(window.__t2);
+    window.__t2 = setTimeout(applyRecoverSlider, 600);
+  });
+  $('#btnApply').addEventListener('click', async ()=>{
+    if(!current) return;
+    await applyProfile(current.profile);
+  });
+  $('#btnRestore').addEventListener('click', async ()=>{
+    await sh(`${ENG} apply balanced`);
+    await sh(`${ENG} set thermal_enabled 0`);
+    setStatus('已恢复均衡并关闭温控守护');
+    refresh();
+    toast('已恢复默认');
+  });
+
+  // 充电控制
+  $('#chargeFast').addEventListener('change', async e=>{
+    if(e.target.checked){
+      await sh(`${ENG} charge_fast`);
+      toast('快速充电已启用');
+    }
+  });
+  $('#btnChargeFast').addEventListener('click', async ()=>{
+    await sh(`${ENG} charge_fast`);
+    toast('快速充电已启用');
+    refresh();
+  });
+  $('#btnChargeNormal').addEventListener('click', async ()=>{
+    await sh(`${ENG} charge_normal`);
+    toast('已恢复默认充电');
+    refresh();
+  });
+  $('#btnChargeStatus').addEventListener('click', async ()=>{
+    const r = await sh(`${ENG} charge_status`, true);
+    const diag = $('#chargeDiag');
+    if(r && r.errno === 0){
+      diag.textContent = r.stdout;
+      diag.style.display = 'block';
+    } else {
+      diag.textContent = '读取失败: ' + (r?.stderr || '无权限');
+      diag.style.display = 'block';
+    }
+  });
+
+  await refresh();
+  setStatus('实时温度每 3 秒自动刷新');
+  setInterval(refresh, 3000);
+}
+
+init();
+</script>
+</body>
+</html>

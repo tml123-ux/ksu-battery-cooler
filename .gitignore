@@ -1,0 +1,8 @@
+# 构建产物（保留 release/ 下的正式发布包）
+battery-cooler-*.zip
+!release/battery-cooler-v1.0.0.zip
+
+# 临时文件
+*.log
+*.tmp
+.DS_Store
