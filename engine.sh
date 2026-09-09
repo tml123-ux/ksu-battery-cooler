@@ -266,24 +266,38 @@ power_w_to_ua() {
 }
 
 # 检测是否正在充电/插电: 0=否 1=是
-# 优先级: 环境变量 BC_CHARGER_FILE(mock) > battery/status > online 节点
+# 优先级: 环境变量 BC_CHARGER_FILE(mock) > 充电器(非电池)在线节点 > battery/status
+# 注意: 必须排除 battery/bms 等电池自身节点, 它们的 online 恒为 1(电池在位), 不代表充电器已连接
 charge_online() {
-    local v f
+    local v f d t found=0
     if [ -n "$BC_CHARGER_FILE" ] && [ -f "$BC_CHARGER_FILE" ]; then
         v=$(cat "$BC_CHARGER_FILE" 2>/dev/null | tr -d ' \n\r')
         case "$v" in 0) echo 0; return 0 ;; 1) echo 1; return 0 ;; esac
     fi
-    if [ -r "$SYS/class/power_supply/battery/status" ]; then
-        v=$(cat "$SYS/class/power_supply/battery/status" 2>/dev/null)
-        case "$v" in
-            *Charging*|*charging*) echo 1; return 0 ;;
-        esac
-    fi
+    # 1) 遍历真正的充电器源(USB/Mains/Wireless 等, type != Battery)的 online 节点
     for f in $SYS/class/power_supply/*/online; do
         [ -r "$f" ] || continue
+        d=$(dirname "$f")
+        t=""
+        [ -r "$d/type" ] && t=$(cat "$d/type" 2>/dev/null)
+        # 电池/电量计自身节点排除
+        case "$t" in
+            *attery*|*BMS*) continue ;;
+        esac
+        found=1
         v=$(cat "$f" 2>/dev/null | tr -d ' \n\r')
         [ "$v" = "1" ] && { echo 1; return 0; }
     done
+    # 2) 存在充电器节点但全部为 0 -> 未插电
+    [ "$found" = "1" ] && { echo 0; return 0; }
+    # 3) 无充电器节点(极少见), 退回 battery/status
+    # 注意: Discharging / Not charging 也含 "charging" 子串, 必须精确匹配前缀
+    if [ -r "$SYS/class/power_supply/battery/status" ]; then
+        v=$(cat "$SYS/class/power_supply/battery/status" 2>/dev/null | tr -d ' \n\r')
+        case "$v" in
+            Charging|Charging*|Full|Full*) echo 1; return 0 ;;
+        esac
+    fi
     echo 0
 }
 
@@ -642,17 +656,23 @@ get_status() {
     charge_auto=$(get_conf charge_auto 0)
     charge_target_w=$(get_conf charge_target_w 90)
     charge_power_w=$(get_conf charge_power_w "")
-    # 尝试读取实际充电参数
-    local actual_current actual_voltage
-    [ -r "$SYS/class/power_supply/battery/current_max" ] && \
-        actual_current=$(cat "$SYS/class/power_supply/battery/current_max" 2>/dev/null)
-    [ -r "$SYS/class/power_supply/battery/voltage_max" ] && \
-        actual_voltage=$(cat "$SYS/class/power_supply/battery/voltage_max" 2>/dev/null)
-    [ -z "$actual_current" ] && actual_current="$charge_current"
-    [ -z "$actual_voltage" ] && actual_voltage="$charge_voltage"
-    # 充电在线状态(仅诊断时读取)
+    # 充电在线状态
     local charging
     charging=$(charge_online)
+    # 仅在充电器连接时展示电流/电压, 否则统一为 0(避免误读 max 残留值/配置回退)
+    local actual_current=0 actual_voltage=0
+    if [ "$charging" = "1" ]; then
+        [ -r "$SYS/class/power_supply/battery/current_max" ] && \
+            actual_current=$(cat "$SYS/class/power_supply/battery/current_max" 2>/dev/null)
+        [ -r "$SYS/class/power_supply/battery/voltage_max" ] && \
+            actual_voltage=$(cat "$SYS/class/power_supply/battery/voltage_max" 2>/dev/null)
+        # 某些设备 max 节点在充电时不可读, 用配置值兜底
+        [ -z "$actual_current" ] && actual_current="$charge_current"
+        [ -z "$actual_voltage" ] && actual_voltage="$charge_voltage"
+        # 数值合法性(全数字)
+        case "$actual_current" in ''|*[!0-9]*) actual_current=0 ;; esac
+        case "$actual_voltage" in ''|*[!0-9]*) actual_voltage=0 ;; esac
+    fi
     echo "{\"profile\":\"$profile\",\"applied\":\"$applied\",\"override\":\"$override\",\"screen\":\"$screen\",\"screen_auto\":\"$screen_auto\",\"temperature\":\"$temp\",\"thermal_enabled\":\"$en\",\"thermal_limit\":\"$limit\",\"thermal_recover\":\"$recover\",\"little_pct\":\"$little\",\"mid_pct\":\"$mid\",\"big_pct\":\"$big\",\"daemon\":\"$alive\",\"charge_limit\":\"$charge_limit\",\"charge_auto\":\"$charge_auto\",\"charge_target_w\":\"$charge_target_w\",\"charge_power_w\":\"$charge_power_w\",\"charging\":\"$charging\",\"charge_current\":\"$actual_current\",\"charge_voltage\":\"$actual_voltage\"}"
 }
 

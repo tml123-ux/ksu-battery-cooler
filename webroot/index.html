@@ -312,21 +312,34 @@ function render(data){
   const charging = data.charging === '1';
   const chgW = parseInt(data.charge_power_w||'0');
   const targetW = parseInt(data.charge_target_w||'90');
-  $('#chargeCurrentDisplay').textContent = (chargeCurrent/1000000).toFixed(1);
-  $('#chargeVoltageDisplay').textContent = (chargeVoltage/1000000).toFixed(1);
-  $('#chargeCurrentVal').textContent = chargeCurrent > 0 ? (chargeCurrent/1000000).toFixed(1)+'A' : '--';
-  $('#chargeVoltageVal').textContent = chargeVoltage > 0 ? (chargeVoltage/1000000).toFixed(1)+'V' : '--';
+  // 未插电时电流/电压一律显示 -- (引擎在未充电时输出 0)
+  if(!charging){
+    $('#chargeCurrentDisplay').textContent = '--';
+    $('#chargeVoltageDisplay').textContent = '--';
+    $('#chargeCurrentVal').textContent = '--';
+    $('#chargeVoltageVal').textContent = '--';
+  } else {
+    $('#chargeCurrentDisplay').textContent = (chargeCurrent/1000000).toFixed(1);
+    $('#chargeVoltageDisplay').textContent = (chargeVoltage/1000000).toFixed(1);
+    $('#chargeCurrentVal').textContent = chargeCurrent > 0 ? (chargeCurrent/1000000).toFixed(1)+'A' : '--';
+    $('#chargeVoltageVal').textContent = chargeVoltage > 0 ? (chargeVoltage/1000000).toFixed(1)+'V' : '--';
+  }
   $('#chargeAuto').checked = chargeAuto;
   $('#chargeTargetSlider').value = targetW;
   $('#chargeTargetVal').textContent = targetW+'W';
   syncChargeSliderFill();
   $('#chargeOnline').textContent = charging ? '已连接' : '未插电';
-  $('#chargePowerDisplay').textContent = chargeAuto
-      ? (chgW > 0 ? chgW+'W' : '待插电')
-      : '已关闭';
+  // 请求功率只在连接充电器时才显示实际值, 否则视为待插电
+  if(!chargeAuto){
+    $('#chargePowerDisplay').textContent = '已关闭';
+  } else if(!charging){
+    $('#chargePowerDisplay').textContent = '待插电';
+  } else {
+    $('#chargePowerDisplay').textContent = (chgW > 0 ? chgW+'W' : '调节中…');
+  }
   $('#chargeStateVal').textContent = !chargeAuto ? '已关闭'
-      : charging ? (chgW > 0 ? chgW+'W / 目标'+targetW+'W' : '待插电')
-      : '未插电';
+      : !charging ? '未插电'
+      : (chgW > 0 ? chgW+'W / 目标'+targetW+'W' : '调节中…');
 
   // 档位高亮
   document.querySelectorAll('.profile').forEach(el=>{
